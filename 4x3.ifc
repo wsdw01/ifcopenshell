@@ -1,0 +1,10 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('ViewDefinition [CoordinationView]'),'2;1');
+FILE_NAME('','2025-07-06T19:27:43',(''),(''),'IfcOpenShell 0.8.0','IfcOpenShell 0.8.0','');
+FILE_SCHEMA(('IFC4X3_ADD2'));
+ENDSEC;
+DATA;
+#1=IFCPROJECT('0mjRDswpL1fP2u5k$dK5ZV',$,'OD Matten',$,$,$,$,$,$);
+ENDSEC;
+END-ISO-10303-21;
