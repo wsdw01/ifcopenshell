@@ -1,25 +1,35 @@
 import ifcopenshell
 
-file_path = "/Users/wojtek/Blender/BM_Strasse_4x3_upgraded.ifc"
+def verify_element_type(ifc_path, element_name):
+    """
+    Otwiera plik IFC i sprawdza faktyczny typ elementu o podanej nazwie.
 
-try:
-    ifc_file = ifcopenshell.open(file_path)
-    products = ifc_file.by_type("IfcProduct")
+    Args:
+        ifc_path (str): Ścieżka do pliku IFC do sprawdzenia.
+        element_name (str): Nazwa elementu do znalezienia.
+    """
+    try:
+        ifc_file = ifcopenshell.open(ifc_path)
+        print(f"Pomyślnie otwarto plik: {ifc_path}")
+    except Exception as e:
+        print(f"Błąd podczas otwierania pliku {ifc_path}: {e}")
+        return
+
+    elements = ifc_file.by_type("IfcProduct")
+    found = False
+    for element in elements:
+        if element.Name == element_name:
+            found = True
+            print(f"\nZnaleziono element o nazwie: '{element_name}'")
+            print(f"  - Jego FAKTYCZNY typ w pliku to: {element.is_a()}")
+            break
     
-    elements_with_geometry = 0
-    elements_without_geometry = 0
+    if not found:
+        print(f"\nNie znaleziono elementu o nazwie '{element_name}' w pliku.")
 
-    for product in products:
-        if product.Representation:
-            elements_with_geometry += 1
-        else:
-            elements_without_geometry += 1
-            # print(f"Element {product.Name} ({product.is_a()}) nie posiada reprezentacji geometrycznej.")
-
-    print(f"W pliku {file_path} znaleziono:")
-    print(f"  - Elementy z geometrią: {elements_with_geometry}")
-    print(f"  - Elementy bez geometrii: {elements_without_geometry}")
-    print(f"  - Łącznie elementów IfcProduct: {len(products)}")
-
-except Exception as e:
-    print(f"Wystąpił błąd podczas otwierania lub przetwarzania pliku {file_path}: {e}")
+if __name__ == "__main__":
+    output_ifc_path = "/Users/wojtek/Blender/BM_Strasse_4x3_upgraded.ifc"
+    terrain_element_name = "B_Terrain_ausgeschnitten.GEL"
+    
+    print(f"--- Weryfikacja pliku: {output_ifc_path} ---")
+    verify_element_type(output_ifc_path, terrain_element_name)

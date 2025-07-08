@@ -24,7 +24,7 @@ def get_property_value(element, pset_name, prop_name):
     return None
 
 
-def clone_element_to_target(source_element, target_file, target_container, owner_history, geometric_context):
+def clone_element_to_target(source_element, target_file, target_container, owner_history, geometric_context, target_type=None):
     """
     Klonuje element (geometrię i właściwości) z pliku źródłowego do docelowego.
     Tworzy nowy element typu IfcBuildingElementProxy w pliku docelowym,
@@ -45,58 +45,64 @@ def clone_element_to_target(source_element, target_file, target_container, owner
     def copy_ifc_entity(source_entity, target_file, copied_entities):
         if source_entity is None:
             return None
-
-        # If already copied, return the copied instance
         if source_entity in copied_entities:
             return copied_entities[source_entity]
-
-        # Handle basic types (int, float, str, bool, tuple) directly
         if not (hasattr(source_entity, 'is_a') and callable(getattr(source_entity, 'is_a')) and source_entity.is_a()):
             return source_entity
 
-        # Collect attributes and their copied values
-        copied_attributes = {}
-        for attribute_name, source_value in source_entity.get_info().items():
-            if attribute_name == "GlobalId":
-                copied_attributes[attribute_name] = ifcopenshell.guid.new()
-            elif attribute_name == "id": # Skip the 'id' attribute
-                continue
-            elif source_value is None:
-                copied_attributes[attribute_name] = None
-            elif hasattr(source_value, 'is_a') and callable(getattr(source_value, 'is_a')) and source_value.is_a():
-                # Recursively copy nested IfcEntity
-                copied_attributes[attribute_name] = copy_ifc_entity(source_value, target_file, copied_entities)
-            elif isinstance(source_value, tuple) and all(hasattr(item, 'is_a') and callable(getattr(item, 'is_a')) and item.is_a() for item in source_value):
-                # Handle tuples of IfcEntities (e.g., FbsmFaces)
-                copied_attributes[attribute_name] = tuple(copy_ifc_entity(item, target_file, copied_entities) for item in source_value)
-            elif isinstance(source_value, list) and all(hasattr(item, 'is_a') and callable(getattr(item, 'is_a')) and item.is_a() for item in source_value):
-                # Handle lists of IfcEntities (e.g., CfsFaces)
-                copied_attributes[attribute_name] = [copy_ifc_entity(item, target_file, copied_entities) for item in source_value]
-            else:
-                # Copy basic types (including tuples/lists of basic types) directly
-                copied_attributes[attribute_name] = source_value
-        
-        # Create a new entity in the target file with all copied attributes
-        # Remove 'type' from copied_attributes as it's already passed as source_entity.is_a()
-        copied_attributes.pop('type', None)
+        # Create a placeholder entity to handle circular references in the model
         new_entity = target_file.create_entity(source_entity.is_a())
-        for attr_name, attr_value in copied_attributes.items():
-            setattr(new_entity, attr_name, attr_value)
-        print(f"DEBUG: Created new entity of type {new_entity.is_a()} with ID {new_entity.id()}")
-        copied_entities[source_entity] = new_entity # Store immediately to handle circular references
+        copied_entities[source_entity] = new_entity
+
+        # Iterate over attributes by index to ensure correct order and avoid inverse attributes
+        for i in range(len(source_entity)):
+            attribute = source_entity[i]
+            
+            # Skip attributes that are handled by the main function or should not be copied directly
+            attr_name = source_entity.attribute_name(i)
+            if attr_name in ('GlobalId', 'OwnerHistory'):
+                continue
+
+            # Recursively copy nested entities or lists of entities
+            if isinstance(attribute, ifcopenshell.entity_instance):
+                attribute = copy_ifc_entity(attribute, target_file, copied_entities)
+            elif isinstance(attribute, (list, tuple)):
+                new_list = []
+                for item in attribute:
+                    if isinstance(item, ifcopenshell.entity_instance):
+                        new_list.append(copy_ifc_entity(item, target_file, copied_entities))
+                    elif isinstance(item, (list, tuple)):
+                        # Handle nested lists of values, e.g. ((1,2,3), (4,5,6)) in IfcTriangulatedFaceSet
+                        new_list.append(type(item)(list(sub_item for sub_item in item)))
+                    else:
+                        new_list.append(item)
+                attribute = type(attribute)(new_list)
+            
+            try:
+                # Set the attribute on the new entity by index
+                new_entity[i] = attribute
+            except Exception:
+                # This may fail for derived or read-only attributes, which is expected.
+                # We can safely ignore these errors.
+                pass
 
         return new_entity
 
     # 1. Utworzenie nowego elementu w pliku docelowym
+    # Używamy typu docelowego, jeśli został podany, w przeciwnym razie używamy typu źródłowego.
+    element_type_to_create = target_type if target_type else source_element.is_a()
     new_element = target_file.create_entity(
-        source_element.is_a(),
+        element_type_to_create,
         GlobalId=ifcopenshell.guid.new(),
         OwnerHistory=owner_history,
         Name=source_element.Name,
-        Description=source_element.Description
+        Description=source_element.Description,
+        ObjectType=source_element.ObjectType
     )
 
-    copied_entities = {} # Initialize the dictionary once for this element
+    # Słownik do śledzenia już skopiowanych encji, aby uniknąć duplikatów i obsłużyć cykliczne zależności.
+    # Klucz: encja w pliku źródłowym, Wartość: encja w pliku docelowym.
+    copied_entities = {source_element: new_element}
 
     # 2. Kopiowanie umiejscowienia (ObjectPlacement)
     if source_element.ObjectPlacement:
@@ -104,63 +110,27 @@ def clone_element_to_target(source_element, target_file, target_container, owner
 
     # 3. Kopiowanie reprezentacji geometrycznej (Representation)
     if source_element.Representation:
-            new_representations_list = []
-            for rep in source_element.Representation.Representations:
-                # Use copy_ifc_entity for each item in the representation
-                new_items_for_representation = [copy_ifc_entity(item, target_file, copied_entities) for item in rep.Items]
-
-                new_shape_representation = target_file.create_entity(
-                    "IfcShapeRepresentation",
-                    ContextOfItems=geometric_context,
-                    RepresentationIdentifier=rep.RepresentationIdentifier,
-                    RepresentationType=rep.RepresentationType,
-                    Items=new_items_for_representation
-                )
-                new_representations_list.append(new_shape_representation)
-            new_representation = target_file.create_entity(
-                "IfcProductDefinitionShape",
-                Representations=new_representations_list
-            )
-            new_element.Representation = new_representation
+        new_element.Representation = copy_ifc_entity(source_element.Representation, target_file, copied_entities)
 
     # 4. Kopiowanie zestawów właściwości (PSet)
-    for pset_name, pset_properties in ifcopenshell.util.element.get_psets(source_element).items():
-        properties_to_add = []
-        for prop_name, prop_value in pset_properties.items():
-            # ifcopenshell.util.element.get_psets returns raw values, so we need to wrap them
-            # in the appropriate IfcValue type. For simplicity, we'll assume IfcText for now.
-            # In a real-world scenario, you'd need more robust type handling.
-            if isinstance(prop_value, (int, float, str, bool)):
-                if isinstance(prop_value, int):
-                    nominal_value = target_file.create_entity("IfcInteger", prop_value)
-                elif isinstance(prop_value, float):
-                    nominal_value = target_file.create_entity("IfcReal", prop_value)
-                elif isinstance(prop_value, bool):
-                    nominal_value = target_file.create_entity("IfcBoolean", prop_value)
-                else:
-                    nominal_value = target_file.create_entity("IfcText", prop_value)
-
-                new_prop = target_file.create_entity(
-                    "IfcPropertySingleValue",
-                    Name=prop_name,
-                    NominalValue=nominal_value
+    # Iterujemy przez relacje właściwości zdefiniowane dla elementu źródłowego.
+    # To jest bardziej niezawodne niż get_psets, ponieważ kopiuje całe encje,
+    # zachowując wszystkie typy danych i struktury.
+    if source_element.IsDefinedBy:
+        for rel in source_element.IsDefinedBy:
+            # Kopiujemy tylko relacje typu IfcRelDefinesByProperties
+            if rel.is_a("IfcRelDefinesByProperties"):
+                # Głębokie kopiowanie definicji właściwości (np. IfcPropertySet)
+                new_property_definition = copy_ifc_entity(rel.RelatingPropertyDefinition, target_file, copied_entities)
+                
+                # Utworzenie nowej relacji w pliku docelowym, łączącej nową definicję właściwości z nowym elementem
+                target_file.create_entity(
+                    "IfcRelDefinesByProperties",
+                    GlobalId=ifcopenshell.guid.new(),
+                    OwnerHistory=owner_history,
+                    RelatingPropertyDefinition=new_property_definition,
+                    RelatedObjects=[new_element]
                 )
-                properties_to_add.append(new_prop)
-        
-        new_pset = target_file.create_entity(
-            "IfcPropertySet",
-            GlobalId=ifcopenshell.guid.new(),
-            OwnerHistory=owner_history,
-            Name=pset_name,
-            HasProperties=properties_to_add
-        )
-        target_file.create_entity(
-            "IfcRelDefinesByProperties",
-            GlobalId=ifcopenshell.guid.new(),
-            OwnerHistory=owner_history,
-            RelatingPropertyDefinition=new_pset,
-            RelatedObjects=[new_element]
-        )
 
     # 5. Przypisanie nowego elementu do kontenera (np. IfcRoadPart) w strukturze przestrzennej
     ifcopenshell.api.run("aggregate.assign_object", target_file, products=[new_element], relating_object=target_container)
@@ -176,9 +146,7 @@ def main():
     target_skeleton_path = "/Users/wojtek/Blender/OD_Matten_4x3.ifc"
     output_ifc_path = "/Users/wojtek/Blender/BM_Strasse_4x3_upgraded.ifc"
 
-    # --- Logika mapowania (zgodnie z plikiem .md) ---
-    # Klucz: Wartość atrybutu PVI_STATIONSBEZUG
-    # Wartość: Nazwa docelowego IfcRoadPart
+    # --- Logika mapowania ---
     mapping_rules = {
         "Achse 006B (B_Achse_Parkstrasse)": "Parkstrasse | CARRIAGEWAY",
         "Achse 001B (B_Achse_Hauptachse)": "Kantonstrasse | CARRIAGEWAY",
@@ -190,40 +158,37 @@ def main():
         "Achse 040B (B_Achse_Rugenstrasse)": "Rugenstrasse | CARRIAGEWAY",
         "Achse 039B (B_Insel_4_aussen)": "Rugenstrasse | CARRIAGEWAY",
     }
-    # Reguła specjalna
-    terrain_rule_property = "PVI_BAUTEILTYP"
-    terrain_rule_value = "Gelände"
     terrain_target_container_name = "Kantonstrasse | CARRIAGEWAY"
 
-
     # --- Implementacja ---
-    print(f"Wczytywanie pliku źródłowego: {source_ifc_path}")
     source_ifc = ifcopenshell.open(source_ifc_path)
-
-    print(f"Wczytywanie szkieletu docelowego: {target_skeleton_path}")
     target_ifc = ifcopenshell.open(target_skeleton_path)
+
+    # Przygotowanie słownika do szybkiego wyszukiwania kontenerów w pliku docelowym
+    target_containers = {
+        part.Name: part for part in target_ifc.by_type("IfcRoadPart")
+    }
+    if not target_containers:
+        print("Krytyczny błąd: Nie znaleziono żadnych elementów IfcRoadPart w pliku docelowym. Nie można kontynuować.")
+        return
+    print(f"Znaleziono następujące kontenery w pliku docelowym: {list(target_containers.keys())}")
 
     # Sprawdzenie i utworzenie IfcOwnerHistory, jeśli nie istnieje
     owner_history = target_ifc.by_type("IfcOwnerHistory")
     if not owner_history:
         print("Brak IfcOwnerHistory w pliku docelowym. Tworzę domyślny.")
-        # Utwórz IfcPerson
         person = target_ifc.create_entity("IfcPerson", FamilyName="Unknown", GivenName="User")
-        # Utwórz IfcOrganization
         organization = target_ifc.create_entity("IfcOrganization", Name="Unknown Organization")
-        # Utwórz IfcApplication
         application = target_ifc.create_entity("IfcApplication",
             ApplicationDeveloper=organization,
             Version="1.0",
             ApplicationFullName="IFC Merger Script",
             ApplicationIdentifier="IFCMerger"
         )
-        # Utwórz IfcPersonAndOrganization
         person_and_organization = target_ifc.create_entity("IfcPersonAndOrganization",
             ThePerson=person,
             TheOrganization=organization
         )
-        # Utwórz IfcOwnerHistory
         owner_history = target_ifc.create_entity("IfcOwnerHistory",
             OwningUser=person_and_organization,
             OwningApplication=application,
@@ -237,15 +202,12 @@ def main():
     geometric_context = target_ifc.by_type("IfcGeometricRepresentationContext")
     if not geometric_context:
         print("Brak IfcGeometricRepresentationContext w pliku docelowym. Tworzę domyślny.")
-        # Utwórz IfcAxis2Placement3D dla WorldCoordinateSystem
         world_coords = target_ifc.create_entity("IfcAxis2Placement3D",
             target_ifc.create_entity("IfcCartesianPoint", (0.0, 0.0, 0.0)),
             target_ifc.create_entity("IfcDirection", (0.0, 0.0, 1.0)),
             target_ifc.create_entity("IfcDirection", (1.0, 0.0, 0.0))
         )
-        # Utwórz IfcDirection dla TrueNorth
         true_north = target_ifc.create_entity("IfcDirection", (0.0, 1.0, 0.0))
-        # Utwórz IfcGeometricRepresentationContext
         geometric_context = target_ifc.create_entity("IfcGeometricRepresentationContext",
             ContextType="Model",
             CoordinateSpaceDimension=3,
@@ -256,30 +218,46 @@ def main():
     else:
         geometric_context = geometric_context[0]
 
-    # Przygotowanie słownika do szybkiego wyszukiwania kontenerów w pliku docelowym
-    target_containers = {
-        part.Name: part for part in target_ifc.by_type("IfcRoadPart")
-    }
-    print(f"Znaleziono następujące kontenery w pliku docelowym: {list(target_containers.keys())}")
+    # --- Logika dla terenu ---
+    print("\n--- Przetwarzanie terenu ---")
+    cloned_terrain_elements = set()
+    terrain_storey = None
+    for storey in source_ifc.by_type("IfcBuildingStorey"):
+        if storey.Name == "Gelände":
+            terrain_storey = storey
+            print(f"Znaleziono kontener terenu (IfcBuildingStorey): '{terrain_storey.Name}'")
+            break
 
-    # Pobranie wszystkich elementów geometrycznych z pliku źródłowego
-    print("\n--- Rozpoczynam przetwarzanie pliku źródłowego ---")
-    print("Krok 1: Pobieranie wszystkich elementów IfcProduct. To może zająć chwilę...")
-    source_products = ifcopenshell.open(source_ifc_path).by_type("IfcProduct")
-    print(f"Krok 1 zakończony. Znaleziono {len(source_products)} elementów w pliku źródłowym.")
-    print("\n--- Rozpoczynam pętlę mapowania i klonowania ---")
-    print("Krok 2: Iterowanie przez elementy, sprawdzanie reguł i klonowanie. To będzie główna część procesu.")
+    if terrain_storey:
+        terrain_target_container = target_containers.get(terrain_target_container_name)
+        if terrain_target_container:
+            print(f"Elementy terenu będą klonowane do: '{terrain_target_container.Name}'")
+            if hasattr(terrain_storey, 'ContainsElements') and terrain_storey.ContainsElements:
+                for rel in terrain_storey.ContainsElements:
+                    for element in rel.RelatedElements:
+                        if element.is_a("IfcProduct") and element.Representation:
+                            print(f"Mapowanie elementu terenu '{element.Name}' ({element.is_a()}) do '{terrain_target_container_name}' jako IfcGeographicElement")
+                            clone_element_to_target(element, target_ifc, terrain_target_container, owner_history, geometric_context, target_type="IfcGeographicElement")
+                            cloned_terrain_elements.add(element.id())
+            else:
+                print("Ostrzeżenie: Kontener terenu nie zawiera żadnych elementów (atrybut ContainsElements jest pusty).")
+        else:
+            print(f"Ostrzeżenie: Nie znaleziono docelowego kontenera dla terenu '{terrain_target_container_name}' w pliku docelowym.")
+    else:
+        print("Ostrzeżenie: Nie znaleziono kontenera terenu (IfcBuildingStorey o nazwie 'Gelände') w pliku źródłowym.")
 
+    # --- Główna pętla przetwarzania ---
+    print("\n--- Rozpoczynam pętlę mapowania i klonowania pozostałych elementów ---")
+    source_products = source_ifc.by_type("IfcProduct")
+    print(f"Znaleziono {len(source_products)} elementów w pliku źródłowym. Rozpoczynam pętlę...")
 
     cloned_count = 0
     cloned_counts_per_class = {}
     for i, product in enumerate(source_products):
-        # Logowanie postępu co 1000 elementów
         if i > 0 and i % 1000 == 0:
             print(f"  ...przetworzono {i} z {len(source_products)} elementów...")
 
-        # Ignorujemy elementy, które nie mają geometrii lub są częścią agregacji
-        if not product.Representation:
+        if not product.Representation or product.id() in cloned_terrain_elements:
             continue
 
         product_type = product.is_a()
@@ -291,34 +269,22 @@ def main():
 
         cloned_counts_per_class[product_type] += 1
 
-        target_container_name = None
+        target_container_name_main = None
+        stationsbezug = get_property_value(product, "ProVI", "PVI_STATIONSBEZUG")
+        if stationsbezug in mapping_rules:
+            target_container_name_main = mapping_rules[stationsbezug]
 
-        # Sprawdzenie reguły dla terenu
-        bauteiltyp = get_property_value(product, "ProVI", terrain_rule_property)
-        if bauteiltyp == terrain_rule_value:
-            target_container_name = terrain_target_container_name
-        else:
-            # Sprawdzenie głównych reguł mapowania
-            stationsbezug = get_property_value(product, "ProVI", "PVI_STATIONSBEZUG")
-            if stationsbezug in mapping_rules:
-                target_container_name = mapping_rules[stationsbezug]
-
-        # Jeśli znaleziono pasujący kontener, klonujemy element
-        if target_container_name and target_container_name in target_containers:
-            target_container = target_containers[target_container_name]
-            print(f"Mapowanie elementu '{product.Name}' ({product.is_a()}) do '{target_container_name}'")
+        if target_container_name_main and target_container_name_main in target_containers:
+            target_container = target_containers[target_container_name_main]
+            print(f"Mapowanie elementu '{product.Name}' ({product.is_a()}) do '{target_container_name_main}'")
             clone_element_to_target(product, target_ifc, target_container, owner_history, geometric_context)
             cloned_count += 1
-        else:
-            print(f"Ostrzeżenie: Nie znaleziono reguły mapowania dla elementu '{product.Name}' ({product.is_a()}). Element zostanie pominięty.")
 
-
-    total_cloned_elements = sum(cloned_counts_per_class.values())
-    print(f"Proces zakończony. Sklonowano {total_cloned_elements} elementów (maks. 100 na klasę) z {len(source_products)} elementów źródłowych.")
+    total_cloned_elements = len(cloned_terrain_elements) + sum(cloned_counts_per_class.values())
+    print(f"\nProces zakończony. Sklonowano łącznie {total_cloned_elements} elementów.")
     print(f"Zapisywanie zaktualizowanego pliku do: {output_ifc_path}")
     target_ifc.write(output_ifc_path)
     print("Gotowe!")
-
 
 if __name__ == "__main__":
     main()
