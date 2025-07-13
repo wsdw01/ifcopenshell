@@ -107,6 +107,72 @@ def create_stakeout_point(ifc_file, site, owner_history, name, coords, propertie
     ifc_file.create_entity("IfcRelDefinesByProperties", ifcopenshell.guid.new(), owner_history, Name=None, Description=None, RelatingPropertyDefinition=prop_set, RelatedObjects=[stakeout_point])
     return stakeout_point
 
+def create_coordinate_annotation(ifc_file, owner_history, context, name, coords, text_height=150.0):
+    """Creates a visible text annotation in the IFC file."""
+    
+    text_to_display = f"X: {coords[0]:.3f}\nY: {coords[1]:.3f}\nZ: {coords[2]:.3f}"
+
+    annotation_placement_3d = ifc_file.create_entity(
+        "IfcAxis2Placement3D",
+        Location=ifc_file.create_entity("IfcCartesianPoint", Coordinates=tuple(coords))
+    )
+
+    annotation = ifc_file.create_entity(
+        "IfcAnnotation",
+        ifcopenshell.guid.new(),
+        owner_history,
+        Name=name,
+        ObjectType="COORDINATE_LABEL",
+        ObjectPlacement=ifc_file.create_entity("IfcLocalPlacement", RelativePlacement=annotation_placement_3d)
+    )
+
+    text_literal = ifc_file.create_entity(
+        "IfcTextLiteralWithExtent",
+        Literal=text_to_display,
+        Placement=ifc_file.create_entity(
+            "IfcAxis2Placement2D",
+            Location=ifc_file.create_entity("IfcCartesianPoint", Coordinates=(0.0, 0.0))
+        ),
+        Path='RIGHT',
+        Extent=ifc_file.create_entity(
+            "IfcPlanarExtent", 
+            SizeInX=text_height * 12,
+            SizeInY=text_height * 4
+        ),
+        BoxAlignment='top-left'
+    )
+
+    text_style_font = ifc_file.create_entity(
+        "IfcTextStyleFontModel",
+        FontSize=ifc_file.create_entity("IfcPositiveLengthMeasure", text_height)
+    )
+    text_style = ifc_file.create_entity(
+        "IfcTextStyle", 
+        TextCharacterAppearance=text_style_font
+    )
+    
+    styled_item = ifc_file.create_entity(
+        "IfcStyledItem", 
+        Item=text_literal, 
+        Styles=[text_style]
+    )
+
+    annotation_representation = ifc_file.create_entity(
+        "IfcShapeRepresentation",
+        ContextOfItems=context,
+        RepresentationIdentifier='Annotation',
+        RepresentationType='Annotation2D',
+        Items=[styled_item]
+    )
+
+    product_shape = ifc_file.create_entity(
+        "IfcProductDefinitionShape",
+        Representations=[annotation_representation]
+    )
+    annotation.Representation = product_shape
+
+    return annotation
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     source_ifc_path = os.path.join(script_dir, "..", "01_Source_IFCs", "Achse.IFC")
@@ -141,25 +207,33 @@ def main():
     
     site = ifc_file.by_type("IfcSite")[0]
     owner_history = ifc_file.by_type("IfcOwnerHistory")[0]
+    context = ifc_file.by_type("IfcGeometricRepresentationContext")[0]
     stakeout_points = []
+    coordinate_annotations = []
     chainage = 0.0
     
-    print("\n--- Creating Stakeout Points for Arcs ---")
+    print("\n--- Creating Stakeout Points and Annotations for Arcs ---")
     for i, seg in enumerate(horizontal_segments):
         if seg['type'] == 'arc':
             print(f"Processing Arc #{i+1} (Radius: {seg['radius']:.2f}m)")
             
             # Start of Arc
             z_start = get_z_from_3d_polyline(seg['start'], points_3d)
-            stakeout_points.append(create_stakeout_point(ifc_file, site, owner_history, f"Arc {i+1} - Start", [float(seg['start'][0]), float(seg['start'][1]), float(z_start)], {'PointType': 'Arc Start', 'Segment': i+1, 'Radius': f"{seg['radius']:.2f}", 'Chainage': f"{chainage:.3f}"}))
-            
+            coords_start = [float(seg['start'][0]), float(seg['start'][1]), float(z_start)]
+            stakeout_points.append(create_stakeout_point(ifc_file, site, owner_history, f"Arc {i+1} - Start", coords_start, {'PointType': 'Arc Start', 'Segment': i+1, 'Radius': f"{seg['radius']:.2f}", 'Chainage': f"{chainage:.3f}"}))
+            coordinate_annotations.append(create_coordinate_annotation(ifc_file, owner_history, context, f"Coords Arc {i+1} - Start", coords_start))
+
             # Mid of Arc
             z_mid = get_z_from_3d_polyline(seg['mid'], points_3d)
-            stakeout_points.append(create_stakeout_point(ifc_file, site, owner_history, f"Arc {i+1} - Mid", [float(seg['mid'][0]), float(seg['mid'][1]), float(z_mid)], {'PointType': 'Arc Mid', 'Segment': i+1, 'Radius': f"{seg['radius']:.2f}", 'Chainage': f"{chainage + seg['length']/2:.3f}"}))
+            coords_mid = [float(seg['mid'][0]), float(seg['mid'][1]), float(z_mid)]
+            stakeout_points.append(create_stakeout_point(ifc_file, site, owner_history, f"Arc {i+1} - Mid", coords_mid, {'PointType': 'Arc Mid', 'Segment': i+1, 'Radius': f"{seg['radius']:.2f}", 'Chainage': f"{chainage + seg['length']/2:.3f}"}))
+            coordinate_annotations.append(create_coordinate_annotation(ifc_file, owner_history, context, f"Coords Arc {i+1} - Mid", coords_mid))
 
             # End of Arc
             z_end = get_z_from_3d_polyline(seg['end'], points_3d)
-            stakeout_points.append(create_stakeout_point(ifc_file, site, owner_history, f"Arc {i+1} - End", [float(seg['end'][0]), float(seg['end'][1]), float(z_end)], {'PointType': 'Arc End', 'Segment': i+1, 'Radius': f"{seg['radius']:.2f}", 'Chainage': f"{chainage + seg['length']:.3f}"}))
+            coords_end = [float(seg['end'][0]), float(seg['end'][1]), float(z_end)]
+            stakeout_points.append(create_stakeout_point(ifc_file, site, owner_history, f"Arc {i+1} - End", coords_end, {'PointType': 'Arc End', 'Segment': i+1, 'Radius': f"{seg['radius']:.2f}", 'Chainage': f"{chainage + seg['length']:.3f}"}))
+            coordinate_annotations.append(create_coordinate_annotation(ifc_file, owner_history, context, f"Coords Arc {i+1} - End", coords_end))
         
         chainage += seg['length']
 
@@ -167,6 +241,11 @@ def main():
         stakeout_group = ifc_file.create_entity("IfcGroup", ifcopenshell.guid.new(), owner_history, Name="Stakeout Points (Arcs)", ObjectType="Survey points")
         ifc_file.create_entity("IfcRelAssignsToGroup", ifcopenshell.guid.new(), owner_history, RelatedObjects=stakeout_points, RelatingGroup=stakeout_group)
         print(f"\nAdded {len(stakeout_points)} stakeout points to a new group.")
+
+    if coordinate_annotations:
+        annotation_group = ifc_file.create_entity("IfcGroup", ifcopenshell.guid.new(), owner_history, Name="Coordinate Annotations", ObjectType="Annotations")
+        ifc_file.create_entity("IfcRelAssignsToGroup", ifcopenshell.guid.new(), owner_history, RelatedObjects=coordinate_annotations, RelatingGroup=annotation_group)
+        print(f"Added {len(coordinate_annotations)} coordinate annotations to a new group.")
 
     ifc_file.write(output_ifc_path)
     print(f"\nSuccessfully created new IFC file at:\n{output_ifc_path}")
