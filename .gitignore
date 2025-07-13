@@ -1,1 +1,3 @@
-.DS_Store\n/02_Generated_IFCs/
+.DS_Store
+/02_Generated_IFCs/
+**/01_Source_IFCs/
