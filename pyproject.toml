@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mia-cli"
+version = "0.1.0"
+description = "Mia — Model Intelligence Assistant CLI for BIM/CAD/IFC"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Mia" }
+]
+dependencies = [
+  "typer>=0.12.3",
+  "rich>=13.7.0",
+  "pydantic>=2.7.0"
+]
+
+[project.scripts]
+mia = "mia_cli.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["mia_cli*"]

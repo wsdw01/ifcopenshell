@@ -1,0 +1,2 @@
+[console_scripts]
+mia = mia_cli.__main__:main
